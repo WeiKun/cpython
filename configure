@@ -800,6 +800,8 @@ with_gcc
 with_icc
 with_cxx_main
 with_suffix
+enable-list-sort
+enable-test-list-sort
 enable_shared
 enable_profiling
 with_pydebug
@@ -5403,6 +5405,34 @@ esac
 { $as_echo "$as_me:${as_lineno-$LINENO}: result: $GNULD" >&5
 $as_echo "$GNULD" >&6; }
 
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-list-sort" >&5
+$as_echo_n "checking for --enable-list-sort... " >&6; }
+# Check whether --enable-list-sort was given.
+if test "${enable_list_sort+set}" = set; then :
+  enableval=$enable_list_sort;
+fi
+
+if test -n "$enable_list_sort"
+then
+    CFLAGS="$CFLAGS -DFAST_LIST_SORT"
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $enable_list_sort" >&5
+$as_echo "$enable_list_sort" >&6; }
+
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-test-list-sort" >&5
+$as_echo_n "checking for --enable-test-list-sort... " >&6; }
+# Check whether --enable-test-list-sort was given.
+if test "${enable_test_list_sort+set}" = set; then :
+  enableval=$enable_test_list_sort;
+fi
+
+if test -n "$enable_test_list_sort"
+then
+    CFLAGS="$CFLAGS -DTEST_LIST_SORT"
+fi
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $enable_test_list_sort" >&5
+$as_echo "$enable_test_list_sort" >&6; }
+
 { $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-shared" >&5
 $as_echo_n "checking for --enable-shared... " >&6; }
 # Check whether --enable-shared was given.
@@ -6274,8 +6304,6 @@ if test "$Py_DEBUG" = 'true'; then
 else
   OPT="-DNDEBUG $OPT"
 fi
-
-OPT="-DFAST_LIST_SORT $OPT"
 
 if test "$ac_arch_flags"
 then

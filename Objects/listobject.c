@@ -2247,7 +2247,7 @@ safe_object_compare(PyObject *v, PyObject *w, MergeState *ms)
  * duplicated).
  */
 static PyObject *
-listsort(PyListObject *self, PyObject *args, PyObject *kwds)
+_listsort(PyListObject *self, PyObject *args, PyObject *kwds)
 {
     MergeState ms;
     PyObject **lo, **hi;
@@ -2490,6 +2490,25 @@ dsu_fail:
     Py_XDECREF(compare);
     Py_XINCREF(result);
     return result;
+}
+
+static PyObject *
+listsort(PyListObject *self, PyObject *args, PyObject *kwds)
+{
+
+#ifdef TEST_LIST_SORT
+    unsigned start_low, start_high, end_low, end_high;
+    __asm__ __volatile__("rdtsc" : "=a" (start_low), "=d" (start_high));
+#endif
+
+    PyObject *res = _listsort(self, args, kwds);
+
+#ifdef TEST_LIST_SORT
+    __asm__ __volatile__("rdtsc" : "=a" (end_low), "=d" (end_high));
+    printf("SORT TIME: %lu\n", (((uint64_t)end_high << 32) | end_low) - (((uint64_t)start_high << 32) | start_low));
+#endif
+
+    return res;
 }
 #undef IFLT
 #undef ISLT
