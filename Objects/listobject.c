@@ -1,6 +1,7 @@
 /* List object implementation */
 
 #include "Python.h"
+#include "longintrepr.h"
 
 #ifdef STDC_HEADERS
 #include <stddef.h>
@@ -1021,20 +1022,101 @@ islt(PyObject *x, PyObject *y, PyObject *compare)
     return i < 0;
 }
 
+
+/* The maximum number of entries in a MergeState's pending-runs stack.
+ * This is enough to sort arrays of size up to about
+ *     32 * phi ** MAX_MERGE_PENDING
+ * where phi ~= 1.618.  85 is ridiculouslylarge enough, good for an array
+ * with 2**64 elements.
+ */
+#define MAX_MERGE_PENDING 85
+
+/* When we get into galloping mode, we stay there until both runs win less
+ * often than MIN_GALLOP consecutive times.  See listsort.txt for more info.
+ */
+#define MIN_GALLOP 7
+
+/* Avoid malloc for small temp arrays. */
+#define MERGESTATE_TEMP_SIZE 256
+
+/* One MergeState exists on the stack per invocation of mergesort.  It's just
+ * a convenient way to pass state around among the helper functions.
+ */
+struct s_slice {
+    PyObject **base;
+    Py_ssize_t len;
+};
+
+typedef struct s_MergeState MergeState;
+
+struct s_MergeState {
+    /* The user-supplied comparison function. or NULL if none given. */
+    PyObject *compare;
+
+    /* This controls when we get *into* galloping mode.  It's initialized
+     * to MIN_GALLOP.  merge_lo and merge_hi tend to nudge it higher for
+     * random data, and lower for highly structured data.
+     */
+    Py_ssize_t min_gallop;
+
+    /* 'a' is temp storage to help with merges.  It contains room for
+     * alloced entries.
+     */
+    PyObject **a;       /* may point to temparray below */
+    Py_ssize_t alloced;
+
+    /* A stack of n pending runs yet to be merged.  Run #i starts at
+     * address base[i] and extends for len[i] elements.  It's always
+     * true (so long as the indices are in bounds) that
+     *
+     *     pending[i].base + pending[i].len == pending[i+1].base
+     *
+     * so we could cut the storage for this, but it's a minor amount,
+     * and keeping all the info explicit simplifies the code.
+     */
+    int n;
+    struct s_slice pending[MAX_MERGE_PENDING];
+
+    /* 'a' points to this when possible, rather than muck with malloc. */
+    PyObject *temparray[MERGESTATE_TEMP_SIZE];
+	
+    /* This is the function we will use to compare two keys,
+     * even when none of our special cases apply and we have to use
+     * safe_object_compare. */
+    int (*key_compare)(PyObject *, PyObject *, MergeState *);
+
+    /* This function is used by unsafe_object_compare to optimize comparisons
+     * when we know our list is type-homogeneous but we can't assume anything else.
+     * In the pre-sort check it is set equal to key->ob_type->tp_richcompare */
+    PyObject *(*key_richcompare)(PyObject *, PyObject *, int);
+
+    /* This function is used by unsafe_tuple_compare to compare the first elements
+     * of tuples. It may be set to safe_object_compare, but the idea is that hopefully
+     * we can assume more, and use one of the special-case compares. */
+    int (*tuple_elem_compare)(PyObject *, PyObject *, MergeState *);
+
+};
+
 /* If COMPARE is NULL, calls PyObject_RichCompareBool with Py_LT, else calls
  * islt.  This avoids a layer of function call in the usual case, and
  * sorting does many comparisons.
  * Returns -1 on error, 1 if x < y, 0 if x >= y.
  */
-#define ISLT(X, Y, COMPARE) ((COMPARE) == NULL ?                        \
+#ifdef FAST_LIST_SORT
+    #define ISLT(X, Y) ((ms->compare == NULL) ? \
+                (*(ms->key_compare))(X, Y, ms) : \
+                islt(X, Y, ms->compare))
+#else
+    #define ISLT(X, Y) ((ms->compare == NULL) ? \
                  PyObject_RichCompareBool(X, Y, Py_LT) :                \
-                 islt(X, Y, COMPARE))
+                islt(X, Y, ms->compare))
+#endif /*FAST_LIST_SORT*/
 
 /* Compare X to Y via "<".  Goto "fail" if the comparison raises an
    error.  Else "k" is set to true iff X<Y, and an "if (k)" block is
    started.  It makes more sense in context <wink>.  X and Y are PyObject*s.
 */
-#define IFLT(X, Y) if ((k = ISLT(X, Y, compare)) < 0) goto fail;  \
+#define IFLT(X, Y) if ((k = ISLT(X, Y)) < 0) goto fail;  \
            if (k)
 
 /* binarysort is the best method for sorting small arrays: it does
@@ -1049,8 +1131,7 @@ islt(PyObject *x, PyObject *y, PyObject *compare)
    the input (nothing is lost or duplicated).
 */
 static int
-binarysort(PyObject **lo, PyObject **hi, PyObject **start, PyObject *compare)
-     /* compare -- comparison function object, or NULL for default */
+binarysort(MergeState *ms, PyObject **lo, PyObject **hi, PyObject **start)
 {
     register Py_ssize_t k;
     register PyObject **l, **p, **r;
@@ -1115,7 +1196,7 @@ elements to get out of order).
 Returns -1 in case of error.
 */
 static Py_ssize_t
-count_run(PyObject **lo, PyObject **hi, PyObject *compare, int *descending)
+count_run(MergeState *ms, PyObject **lo, PyObject **hi, int *descending)
 {
     Py_ssize_t k;
     Py_ssize_t n;
@@ -1170,7 +1251,7 @@ key, and the last n-k should follow key.
 Returns -1 on error.  See listsort.txt for info on the method.
 */
 static Py_ssize_t
-gallop_left(PyObject *key, PyObject **a, Py_ssize_t n, Py_ssize_t hint, PyObject *compare)
+gallop_left(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n, Py_ssize_t hint)
 {
     Py_ssize_t ofs;
     Py_ssize_t lastofs;
@@ -1261,7 +1342,7 @@ we're sticking to "<" comparisons that it's much harder to follow if
 written as one routine with yet another "left or right?" flag.
 */
 static Py_ssize_t
-gallop_right(PyObject *key, PyObject **a, Py_ssize_t n, Py_ssize_t hint, PyObject *compare)
+gallop_right(MergeState *ms, PyObject *key, PyObject **a, Py_ssize_t n, Py_ssize_t hint)
 {
     Py_ssize_t ofs;
     Py_ssize_t lastofs;
@@ -1337,62 +1418,6 @@ fail:
     return -1;
 }
 
-/* The maximum number of entries in a MergeState's pending-runs stack.
- * This is enough to sort arrays of size up to about
- *     32 * phi ** MAX_MERGE_PENDING
- * where phi ~= 1.618.  85 is ridiculouslylarge enough, good for an array
- * with 2**64 elements.
- */
-#define MAX_MERGE_PENDING 85
-
-/* When we get into galloping mode, we stay there until both runs win less
- * often than MIN_GALLOP consecutive times.  See listsort.txt for more info.
- */
-#define MIN_GALLOP 7
-
-/* Avoid malloc for small temp arrays. */
-#define MERGESTATE_TEMP_SIZE 256
-
-/* One MergeState exists on the stack per invocation of mergesort.  It's just
- * a convenient way to pass state around among the helper functions.
- */
-struct s_slice {
-    PyObject **base;
-    Py_ssize_t len;
-};
-
-typedef struct s_MergeState {
-    /* The user-supplied comparison function. or NULL if none given. */
-    PyObject *compare;
-
-    /* This controls when we get *into* galloping mode.  It's initialized
-     * to MIN_GALLOP.  merge_lo and merge_hi tend to nudge it higher for
-     * random data, and lower for highly structured data.
-     */
-    Py_ssize_t min_gallop;
-
-    /* 'a' is temp storage to help with merges.  It contains room for
-     * alloced entries.
-     */
-    PyObject **a;       /* may point to temparray below */
-    Py_ssize_t alloced;
-
-    /* A stack of n pending runs yet to be merged.  Run #i starts at
-     * address base[i] and extends for len[i] elements.  It's always
-     * true (so long as the indices are in bounds) that
-     *
-     *     pending[i].base + pending[i].len == pending[i+1].base
-     *
-     * so we could cut the storage for this, but it's a minor amount,
-     * and keeping all the info explicit simplifies the code.
-     */
-    int n;
-    struct s_slice pending[MAX_MERGE_PENDING];
-
-    /* 'a' points to this when possible, rather than muck with malloc. */
-    PyObject *temparray[MERGESTATE_TEMP_SIZE];
-} MergeState;
-
 /* Conceptually a MergeState's constructor. */
 static void
 merge_init(MergeState *ms, PyObject *compare)
@@ -1459,7 +1484,7 @@ merge_lo(MergeState *ms, PyObject **pa, Py_ssize_t na,
                          PyObject **pb, Py_ssize_t nb)
 {
     Py_ssize_t k;
-    PyObject *compare;
+    //PyObject *compare;
     PyObject **dest;
     int result = -1;            /* guilty until proved innocent */
     Py_ssize_t min_gallop;
@@ -1479,7 +1504,7 @@ merge_lo(MergeState *ms, PyObject **pa, Py_ssize_t na,
         goto CopyB;
 
     min_gallop = ms->min_gallop;
-    compare = ms->compare;
+    //compare = ms->compare;
     for (;;) {
         Py_ssize_t acount = 0;          /* # of times A won in a row */
         Py_ssize_t bcount = 0;          /* # of times B won in a row */
@@ -1489,7 +1514,7 @@ merge_lo(MergeState *ms, PyObject **pa, Py_ssize_t na,
          */
         for (;;) {
             assert(na > 1 && nb > 0);
-            k = ISLT(*pb, *pa, compare);
+            k = ISLT(*pb, *pa);
             if (k) {
                 if (k < 0)
                     goto Fail;
@@ -1524,7 +1549,7 @@ merge_lo(MergeState *ms, PyObject **pa, Py_ssize_t na,
             assert(na > 1 && nb > 0);
             min_gallop -= min_gallop > 1;
             ms->min_gallop = min_gallop;
-            k = gallop_right(*pb, pa, na, 0, compare);
+            k = gallop_right(ms, *pb, pa, na, 0);
             acount = k;
             if (k) {
                 if (k < 0)
@@ -1547,7 +1572,7 @@ merge_lo(MergeState *ms, PyObject **pa, Py_ssize_t na,
             if (nb == 0)
                 goto Succeed;
 
-            k = gallop_left(*pa, pb, nb, 0, compare);
+            k = gallop_left(ms, *pa, pb, nb, 0);
             bcount = k;
             if (k) {
                 if (k < 0)
@@ -1591,7 +1616,7 @@ static Py_ssize_t
 merge_hi(MergeState *ms, PyObject **pa, Py_ssize_t na, PyObject **pb, Py_ssize_t nb)
 {
     Py_ssize_t k;
-    PyObject *compare;
+    //PyObject *compare;
     PyObject **dest;
     int result = -1;            /* guilty until proved innocent */
     PyObject **basea;
@@ -1616,7 +1641,7 @@ merge_hi(MergeState *ms, PyObject **pa, Py_ssize_t na, PyObject **pb, Py_ssize_t
         goto CopyA;
 
     min_gallop = ms->min_gallop;
-    compare = ms->compare;
+    //compare = ms->compare;
     for (;;) {
         Py_ssize_t acount = 0;          /* # of times A won in a row */
         Py_ssize_t bcount = 0;          /* # of times B won in a row */
@@ -1626,7 +1651,7 @@ merge_hi(MergeState *ms, PyObject **pa, Py_ssize_t na, PyObject **pb, Py_ssize_t
          */
         for (;;) {
             assert(na > 0 && nb > 1);
-            k = ISLT(*pb, *pa, compare);
+            k = ISLT(*pb, *pa);
             if (k) {
                 if (k < 0)
                     goto Fail;
@@ -1661,7 +1686,7 @@ merge_hi(MergeState *ms, PyObject **pa, Py_ssize_t na, PyObject **pb, Py_ssize_t
             assert(na > 0 && nb > 1);
             min_gallop -= min_gallop > 1;
             ms->min_gallop = min_gallop;
-            k = gallop_right(*pb, basea, na, na-1, compare);
+            k = gallop_right(ms, *pb, basea, na, na-1);
             if (k < 0)
                 goto Fail;
             k = na - k;
@@ -1679,7 +1704,7 @@ merge_hi(MergeState *ms, PyObject **pa, Py_ssize_t na, PyObject **pb, Py_ssize_t
             if (nb == 1)
                 goto CopyA;
 
-            k = gallop_left(*pa, baseb, nb, nb-1, compare);
+            k = gallop_left(ms, *pa, baseb, nb, nb-1);
             if (k < 0)
                 goto Fail;
             k = nb - k;
@@ -1731,7 +1756,7 @@ merge_at(MergeState *ms, Py_ssize_t i)
     PyObject **pa, **pb;
     Py_ssize_t na, nb;
     Py_ssize_t k;
-    PyObject *compare;
+    //PyObject *compare;
 
     assert(ms != NULL);
     assert(ms->n >= 2);
@@ -1757,8 +1782,8 @@ merge_at(MergeState *ms, Py_ssize_t i)
     /* Where does b start in a?  Elements in a before that can be
      * ignored (already in place).
      */
-    compare = ms->compare;
-    k = gallop_right(*pb, pa, na, 0, compare);
+    //compare = ms->compare;
+    k = gallop_right(ms, *pb, pa, na, 0);
     if (k < 0)
         return -1;
     pa += k;
@@ -1769,7 +1794,7 @@ merge_at(MergeState *ms, Py_ssize_t i)
     /* Where does a end in b?  Elements in b after that can be
      * ignored (already in place).
      */
-    nb = gallop_left(pa[na-1], pb, nb, nb-1, compare);
+    nb = gallop_left(ms, pa[na-1], pb, nb, nb-1);
     if (nb <= 0)
         return nb;
 
@@ -2035,6 +2060,187 @@ build_cmpwrapper(PyObject *cmpfunc)
     return (PyObject *)co;
 }
 
+#ifdef FAST_LIST_SORT
+/* string compare: safe for any two latin (one byte per char) strings. */
+static int
+unsafe_string_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+    Py_ssize_t len_a, len_b;
+    Py_ssize_t min_len;
+    int res;
+
+    /* Modified from Objects/unicodeobject.c:unicode_compare, assuming: */
+    assert(v->ob_type == w->ob_type);
+	
+    len_a = Py_SIZE(v);
+	len_b = Py_SIZE(w);
+    min_len = (len_a < len_b) ? len_a : len_b;
+    
+    if (min_len > 0) {
+        res = Py_CHARMASK(*((PyStringObject *)v)->ob_sval) - Py_CHARMASK(*((PyStringObject *)w)->ob_sval);
+        if (res==0)
+            res = memcmp(((PyStringObject *)v)->ob_sval, ((PyStringObject *)w)->ob_sval, min_len);
+    } else
+        res = 0;
+
+    res = (res != 0 ?
+           res < 0 :
+           len_a < len_b);
+
+    assert(res == PyObject_RichCompareBool(v, w, Py_LT));
+    return res;
+}
+
+/* Bounded int compare: compare any two longs that fit in a single machine word. */
+static int
+unsafe_int_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+    register long i = ((PyIntObject *)v)->ob_ival;
+    register long j = ((PyIntObject *)w)->ob_ival;
+    assert((i < j) == PyObject_RichCompareBool(v, w, Py_LT));
+    return i < j;
+}
+
+/* Bounded int compare: compare any two longs that fit in a single machine word. */
+static int
+unsafe_long_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+	PyLongObject *a = (PyLongObject *)v;
+	PyLongObject *b = (PyLongObject *)w;
+    Py_ssize_t sign;
+
+    /* Modified from Objects/longobject.c:long_compare, assuming: */
+    assert(v->ob_type == w->ob_type);
+    assert(v->ob_type == &PyLong_Type);
+	assert(((Py_SIZE(v)) < 0 ? -(Py_SIZE(v)) : (Py_SIZE(v))) <= 1);
+	assert(((Py_SIZE(w)) < 0 ? -(Py_SIZE(w)) : (Py_SIZE(w))) <= 1);
+	
+    if (Py_SIZE(a) != Py_SIZE(b)) {
+        sign = Py_SIZE(a) - Py_SIZE(b);
+    }
+    else {
+        Py_ssize_t i = ((Py_SIZE(a)) < 0 ? -(Py_SIZE(a)) : (Py_SIZE(a)));
+        while (--i >= 0 && a->ob_digit[i] == b->ob_digit[i])
+            ;
+        if (i < 0)
+            sign = 0;
+        else {
+            sign = (sdigit)a->ob_digit[i] - (sdigit)b->ob_digit[i];
+            if (Py_SIZE(a) < 0)
+                sign = -sign;
+        }
+    }
+	
+    assert((sign < 0) == PyObject_RichCompareBool(v, w, Py_LT));
+    return sign < 0;
+}
+
+/* Float compare: compare any two floats. */
+static int
+unsafe_float_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+    int res;
+
+    /* Modified from Objects/floatobject.c:float_richcompare, assuming: */
+    assert(v->ob_type == w->ob_type);
+    assert(v->ob_type == &PyFloat_Type);
+
+    res = PyFloat_AS_DOUBLE(v) < PyFloat_AS_DOUBLE(w);
+    assert(res == PyObject_RichCompareBool(v, w, Py_LT));
+    return res;
+}
+
+/* Homogeneous compare: safe for any two compareable objects of the same type.
+ * (ms->key_richcompare is set to ob_type->tp_richcompare in the
+ *  pre-sort check.)
+ */
+static int
+unsafe_object_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+    PyObject *res_obj; int res;
+
+    /* No assumptions, because we check first: */
+    if (v->ob_type->tp_richcompare != ms->key_richcompare)
+        return PyObject_RichCompareBool(v, w, Py_LT);
+
+    assert(ms->key_richcompare != NULL);
+    res_obj = (*(ms->key_richcompare))(v, w, Py_LT);
+
+    if (res_obj == Py_NotImplemented) {
+        Py_DECREF(res_obj);
+        return PyObject_RichCompareBool(v, w, Py_LT);
+    }
+    if (res_obj == NULL)
+        return -1;
+
+    if (PyBool_Check(res_obj)) {
+        res = (res_obj == Py_True);
+    }
+    else {
+        res = PyObject_IsTrue(res_obj);
+    }
+    Py_DECREF(res_obj);
+
+    /* Note that we can't assert
+     *     res == PyObject_RichCompareBool(v, w, Py_LT);
+     * because of evil compare functions like this:
+     *     lambda a, b:  int(random.random() * 3) - 1)
+     * (which is actually in test_sort.py) */
+    assert(res == PyObject_RichCompareBool(v, w, Py_LT));
+    return res;
+}
+
+/* Tuple compare: compare *any* two tuples, using
+ * ms->tuple_elem_compare to compare the first elements, which is set
+ * using the same pre-sort check as we use for ms->key_compare,
+ * but run on the list [x[0] for x in L]. This allows us to optimize compares
+ * on two levels (as long as [x[0] for x in L] is type-homogeneous.) The idea is
+ * that most tuple compares don't involve x[1:]. */
+static int
+unsafe_tuple_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+    PyTupleObject *vt, *wt;
+    Py_ssize_t i, vlen, wlen;
+    int k;
+
+    /* Modified from Objects/tupleobject.c:tuplerichcompare, assuming: */
+    assert(v->ob_type == w->ob_type);
+    assert(v->ob_type == &PyTuple_Type);
+    assert(Py_SIZE(v) > 0);
+    assert(Py_SIZE(w) > 0);
+
+    vt = (PyTupleObject *)v;
+    wt = (PyTupleObject *)w;
+
+    vlen = Py_SIZE(vt);
+    wlen = Py_SIZE(wt);
+
+    for (i = 0; i < vlen && i < wlen; i++) {
+        k = PyObject_RichCompareBool(vt->ob_item[i], wt->ob_item[i], Py_EQ);
+        if (k < 0)
+            return -1;
+        if (!k)
+            break;
+    }
+
+    if (i >= vlen || i >= wlen)
+        return vlen < wlen;
+
+    if (i == 0)
+        return ms->tuple_elem_compare(vt->ob_item[i], wt->ob_item[i], ms);
+    else
+        return PyObject_RichCompareBool(vt->ob_item[i], wt->ob_item[i], Py_LT);
+}
+
+/* Heterogeneous compare: default, always safe to fall back on. */
+static int
+safe_object_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+    /* No assumptions necessary! */
+	return ms->compare == NULL ? PyObject_RichCompareBool(v, w, Py_LT) : islt(v, w, ms->compare);
+}
+#endif
+
 /* An adaptive, stable, natural mergesort.  See listsort.txt.
  * Returns Py_None on success, NULL on error.  Even in case of error, the
  * list will be some permutation of its input state (nothing is lost or
@@ -2118,6 +2324,82 @@ listsort(PyListObject *self, PyObject *args, PyObject *kwds)
         reverse_slice(saved_ob_item, saved_ob_item + saved_ob_size);
 
     merge_init(&ms, compare);
+	
+#ifdef FAST_LIST_SORT
+    /* The pre-sort check: here's where we decide which compare function to use.
+     * How much optimization is safe? We test for homogeneity with respect to
+     * several properties that are expensive to check at compare-time, and
+     * set ms appropriately. */
+    if (!compare && saved_ob_size > 1) {
+        /* Assume the first element is representative of the whole list. */
+        int keys_are_in_tuples = (saved_ob_item[0]->ob_type == &PyTuple_Type &&
+                                  Py_SIZE(saved_ob_item[0]) > 0);
+
+        PyTypeObject* key_type = (keys_are_in_tuples ?
+                                  PyTuple_GET_ITEM(saved_ob_item[0], 0)->ob_type :
+                                  saved_ob_item[0]->ob_type);
+
+        int keys_are_all_same_type = 1;
+
+        /* Prove that assumption by checking every key. */
+        for (i=0; i < saved_ob_size; i++) {
+
+            if (keys_are_in_tuples &&
+                !(saved_ob_item[i]->ob_type == &PyTuple_Type && Py_SIZE(saved_ob_item[i]) != 0)) {
+                keys_are_in_tuples = 0;
+                keys_are_all_same_type = 0;
+                break;
+            }
+
+            /* Note: for lists of tuples, key is the first element of the tuple
+             * saved_ob_item[i], not saved_ob_item[i] itself! We verify type-homogeneity
+             * for lists of tuples in the if-statement directly above. */
+            key = keys_are_in_tuples ? PyTuple_GET_ITEM(saved_ob_item[i], 0) : saved_ob_item[i];
+
+            if (key->ob_type != key_type) {
+                keys_are_all_same_type = 0;
+                break;
+            }
+        }
+
+        /* Choose the best compare, given what we now know about the keys. */
+        if (keys_are_all_same_type) {
+            if (key_type == &PyString_Type) {
+                ms.key_compare = unsafe_string_compare;
+            }
+            else if (key_type == &PyLong_Type) {
+                ms.key_compare = unsafe_long_compare;
+            }
+            else if (key_type == &PyInt_Type) {
+                ms.key_compare = unsafe_int_compare;
+            }
+            else if (key_type == &PyFloat_Type) {
+				ms.key_compare = unsafe_float_compare;
+            }
+            else if ((ms.key_richcompare = key_type->tp_richcompare) != NULL) {
+                ms.key_compare = unsafe_object_compare;
+            }
+            else {
+                ms.key_compare = safe_object_compare;
+            }
+        }
+        else {
+            ms.key_compare = safe_object_compare;
+        }
+
+        if (keys_are_in_tuples) {
+            /* Make sure we're not dealing with tuples of tuples
+             * (remember: here, key_type refers list [key[0] for key in keys]) */
+            if (key_type == &PyTuple_Type)
+                ms.tuple_elem_compare = safe_object_compare;
+            else
+                ms.tuple_elem_compare = ms.key_compare;
+			
+            ms.key_compare = unsafe_tuple_compare;
+        }
+    }
+#endif /*FAST_LIST_SORT*/
+    /* End of pre-sort check: ms is now set properly! */
 
     nremaining = saved_ob_size;
     if (nremaining < 2)
@@ -2134,7 +2416,7 @@ listsort(PyListObject *self, PyObject *args, PyObject *kwds)
         Py_ssize_t n;
 
         /* Identify next run. */
-        n = count_run(lo, hi, compare, &descending);
+        n = count_run(&ms, lo, hi, &descending);
         if (n < 0)
             goto fail;
         if (descending)
@@ -2143,7 +2425,7 @@ listsort(PyListObject *self, PyObject *args, PyObject *kwds)
         if (n < minrun) {
             const Py_ssize_t force = nremaining <= minrun ?
                               nremaining : minrun;
-            if (binarysort(lo, lo + force, lo + n, compare) < 0)
+            if (binarysort(&ms, lo, lo + force, lo + n) < 0)
                 goto fail;
             n = force;
         }

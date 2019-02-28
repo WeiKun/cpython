@@ -6275,6 +6275,8 @@ else
   OPT="-DNDEBUG $OPT"
 fi
 
+OPT="-DFAST_LIST_SORT $OPT"
+
 if test "$ac_arch_flags"
 then
 	BASECFLAGS="$BASECFLAGS $ac_arch_flags"
