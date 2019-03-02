@@ -800,8 +800,8 @@ with_gcc
 with_icc
 with_cxx_main
 with_suffix
-enable-list-sort
-enable-test-list-sort
+enable-list-sort-optimization
+enable-list-sort-test
 enable_shared
 enable_profiling
 with_pydebug
@@ -5405,33 +5405,33 @@ esac
 { $as_echo "$as_me:${as_lineno-$LINENO}: result: $GNULD" >&5
 $as_echo "$GNULD" >&6; }
 
-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-list-sort" >&5
-$as_echo_n "checking for --enable-list-sort... " >&6; }
-# Check whether --enable-list-sort was given.
-if test "${enable_list_sort+set}" = set; then :
-  enableval=$enable_list_sort;
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-list-sort-optimization" >&5
+$as_echo_n "checking for --enable-list-sort-optimization... " >&6; }
+# Check whether --enable-list-sort-optimization was given.
+if test "${enable_list_sort_optimization+set}" = set; then :
+  enableval=$enable_list_sort_optimization;
 fi
 
-if test -n "$enable_list_sort"
+if test -n "$enable_list_sort_optimization"
 then
     CFLAGS="$CFLAGS -DLIST_SORT_OPTIMIZATION"
 fi
-{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $enable_list_sort" >&5
-$as_echo "$enable_list_sort" >&6; }
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $enable_list_sort_optimization" >&5
+$as_echo "$enable_list_sort_optimization" >&6; }
 
-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-test-list-sort" >&5
-$as_echo_n "checking for --enable-test-list-sort... " >&6; }
-# Check whether --enable-test-list-sort was given.
-if test "${enable_test_list_sort+set}" = set; then :
-  enableval=$enable_test_list_sort;
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-list-sort-test" >&5
+$as_echo_n "checking for --enable-list-sort-test... " >&6; }
+# Check whether --enable-list-sort-test was given.
+if test "${enable_list_sort_test+set}" = set; then :
+  enableval=$enable_list_sort_test;
 fi
 
-if test -n "$enable_test_list_sort"
+if test -n "$enable_list_sort_test"
 then
     CFLAGS="$CFLAGS -DTEST_LIST_SORT"
 fi
-{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $enable_test_list_sort" >&5
-$as_echo "$enable_test_list_sort" >&6; }
+{ $as_echo "$as_me:${as_lineno-$LINENO}: result: $enable_list_sort_test" >&5
+$as_echo "$enable_list_sort_test" >&6; }
 
 { $as_echo "$as_me:${as_lineno-$LINENO}: checking for --enable-shared" >&5
 $as_echo_n "checking for --enable-shared... " >&6; }
