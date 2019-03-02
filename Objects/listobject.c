@@ -1102,7 +1102,7 @@ struct s_MergeState {
  * sorting does many comparisons.
  * Returns -1 on error, 1 if x < y, 0 if x >= y.
  */
-#ifdef FAST_LIST_SORT
+#ifdef LIST_SORT_OPTIMIZATION
     #define ISLT(X, Y) ((ms->compare == NULL) ? \
                 (*(ms->key_compare))(X, Y, ms) : \
                 islt(X, Y, ms->compare))
@@ -1110,7 +1110,7 @@ struct s_MergeState {
     #define ISLT(X, Y) ((ms->compare == NULL) ? \
                  PyObject_RichCompareBool(X, Y, Py_LT) :                \
                 islt(X, Y, ms->compare))
-#endif /*FAST_LIST_SORT*/
+#endif /*LIST_SORT_OPTIMIZATION*/
 
 /* Compare X to Y via "<".  Goto "fail" if the comparison raises an
    error.  Else "k" is set to true iff X<Y, and an "if (k)" block is
@@ -2060,7 +2060,7 @@ build_cmpwrapper(PyObject *cmpfunc)
     return (PyObject *)co;
 }
 
-#ifdef FAST_LIST_SORT
+#ifdef LIST_SORT_OPTIMIZATION
 /* string compare: safe for any two latin (one byte per char) strings. */
 static int
 unsafe_string_compare(PyObject *v, PyObject *w, MergeState *ms)
@@ -2325,7 +2325,7 @@ _listsort(PyListObject *self, PyObject *args, PyObject *kwds)
 
     merge_init(&ms, compare);
 	
-#ifdef FAST_LIST_SORT
+#ifdef LIST_SORT_OPTIMIZATION
     /* The pre-sort check: here's where we decide which compare function to use.
      * How much optimization is safe? We test for homogeneity with respect to
      * several properties that are expensive to check at compare-time, and
@@ -2398,7 +2398,7 @@ _listsort(PyListObject *self, PyObject *args, PyObject *kwds)
             ms.key_compare = unsafe_tuple_compare;
         }
     }
-#endif /*FAST_LIST_SORT*/
+#endif /*LIST_SORT_OPTIMIZATION*/
     /* End of pre-sort check: ms is now set properly! */
 
     nremaining = saved_ob_size;
