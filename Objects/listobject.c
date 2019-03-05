@@ -2367,9 +2367,9 @@ _listsort(PyListObject *self, PyObject *args, PyObject *kwds)
             if (key_type == &PyString_Type) {
                 ms.key_compare = unsafe_string_compare;
             }
-            //else if (key_type == &PyLong_Type) {
-            //    ms.key_compare = unsafe_long_compare;
-            //}
+            else if (key_type == &PyLong_Type) {
+                ms.key_compare = unsafe_long_compare;
+            }
             else if (key_type == &PyInt_Type) {
                 ms.key_compare = unsafe_int_compare;
             }
