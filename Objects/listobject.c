@@ -2091,6 +2091,52 @@ unsafe_string_compare(PyObject *v, PyObject *w, MergeState *ms)
     return res;
 }
 
+static int
+unsafe_unicode_compare(PyObject *v, PyObject *w, MergeState *ms)
+{
+    register Py_ssize_t len1, len2;
+    int res;
+    PyUnicodeObject *obj1 = NULL, *obj2 = NULL;
+    obj1 = (PyUnicodeObject *)PyUnicode_FromObject(v);
+    if (obj1 == NULL)
+        goto onError;
+    obj2 = (PyUnicodeObject *)PyUnicode_FromObject(w);
+    if (obj2 == NULL)
+        goto onError;
+
+    Py_UNICODE *s1 = obj1->str;
+    Py_UNICODE *s2 = obj1->str;
+
+    len1 = obj1->length;
+    len2 = obj2->length;
+
+    while (len1 > 0 && len2 > 0) {
+        Py_UNICODE c1, c2;
+
+        c1 = *s1++;
+        c2 = *s2++;
+
+        if (c1 != c2)
+            return (c1 < c2) ? -1 : 1;
+
+        len1--; len2--;
+    }
+    
+    res = (len1 < len2) ? -1 : (len1 != len2);
+    res = (res == 1);
+
+    assert(res == PyObject_RichCompareBool(v, w, Py_LT));
+
+    Py_DECREF(obj1);
+    Py_DECREF(obj2);
+    return res;
+
+onError:
+    Py_DECREF(obj1);
+    Py_DECREF(obj2);
+    return 0;
+}
+
 /* Bounded int compare: compare any two longs that fit in a single machine word. */
 static int
 unsafe_int_compare(PyObject *v, PyObject *w, MergeState *ms)
@@ -2375,6 +2421,9 @@ _listsort(PyListObject *self, PyObject *args, PyObject *kwds)
             }
             else if (key_type == &PyFloat_Type) {
 				ms.key_compare = unsafe_float_compare;
+            }
+            else if (key_type == &PyUnicode_Type) {
+                ms.key_compare = unsafe_unicode_compare;
             }
             else if ((ms.key_richcompare = key_type->tp_richcompare) != NULL) {
                 ms.key_compare = unsafe_object_compare;
